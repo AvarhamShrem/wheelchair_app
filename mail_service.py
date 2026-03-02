@@ -1,30 +1,64 @@
-from dataclasses import dataclass
-from datetime import datetime
-from typing import Optional
+from __future__ import annotations
 
-@dataclass(frozen=True)
-class Transaction:
-    timestamp: datetime
-    created_by: str
-    wheelchair_id: str
-    txn_type: str
-    from_location_id: int
-    to_location_id: int
-    status_after: str
-    condition_after: str
-    patient_name: str = ""
-    notes: str = ""
+import smtplib
+from datetime import date, timedelta
+from email.message import EmailMessage
+from typing import Dict
 
-    def to_json_dict(self) -> dict:
-        return {
-            "WheelchairID": int(self.wheelchair_id),
-            "Timestamp": self.timestamp.strftime("%Y-%m-%dT%H:%M:%S"),
-            "CreatedBy": self.created_by,
-            "TxnType": self.txn_type,
-            "FromLocationID": int(self.from_location_id),
-            "ToLocationID": int(self.to_location_id),
-            "StatusAfter": self.status_after,
-            "ConditionAfter": self.condition_after,
-            "PatientName": self.patient_name,
-            "Notes": self.notes,
-        }
+import excel_db
+from config import SMTP_FROM, SMTP_HOST, SMTP_PASSWORD, SMTP_PORT, SMTP_USER, USE_STARTTLS
+
+
+def _send_message(msg: EmailMessage) -> None:
+    with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as smtp:
+        if USE_STARTTLS:
+            smtp.starttls()
+        if SMTP_USER:
+            smtp.login(SMTP_USER, SMTP_PASSWORD)
+        smtp.send_message(msg)
+
+
+def send_mail_with_attachment_json(
+    to_list: str,
+    subject: str,
+    json_bytes: bytes,
+    attachment_name: str,
+    body: str = "",
+) -> None:
+    msg = EmailMessage()
+    msg["From"] = SMTP_FROM or SMTP_USER
+    msg["To"] = to_list
+    msg["Subject"] = subject
+    msg.set_content(body or "")
+    msg.add_attachment(json_bytes, maintype="application", subtype="json", filename=attachment_name)
+    _send_message(msg)
+
+
+def send_weekly_report_email(to_list: str) -> None:
+    end_date = date.today() - timedelta(days=1)
+    start_date = end_date - timedelta(days=6)
+
+    transfer_count = excel_db.count_txn_type_in_range("העברה", start_date, end_date)
+    status_counts: Dict[str, int] = excel_db.status_aggregation_from_current()
+
+    lines = [
+        "Weekly Wheelchair Summary",
+        f"Range: {start_date.isoformat()} to {end_date.isoformat()}",
+        "",
+        f'Transactions with TxnType="העברה": {transfer_count}',
+        "",
+        "Current status aggregation from WC_Current:",
+    ]
+
+    if status_counts:
+        for status, count in sorted(status_counts.items()):
+            lines.append(f"- {status}: {count}")
+    else:
+        lines.append("- No status data found")
+
+    msg = EmailMessage()
+    msg["From"] = SMTP_FROM or SMTP_USER
+    msg["To"] = to_list
+    msg["Subject"] = f"Weekly Wheelchair Report ({start_date.isoformat()} - {end_date.isoformat()})"
+    msg.set_content("\n".join(lines))
+    _send_message(msg)
